@@ -1,4 +1,8 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()  # MUST be before os.getenv()
+
 import uuid
 import logging
 import json
