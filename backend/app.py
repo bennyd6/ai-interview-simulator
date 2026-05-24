@@ -1,12 +1,9 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()  # MUST be before os.getenv()
-
 import uuid
 import logging
-import json
-from typing import Dict, List
+from typing import Dict
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -14,63 +11,97 @@ from pypdf import PdfReader
 from groq import Groq
 import edge_tts
 from duckduckgo_search import DDGS
+import uvicorn
 
-# --- CONFIGURATION ---
-app = FastAPI()
+load_dotenv()
+
+app = FastAPI(title="AI Interview Backend")
+
 logging.basicConfig(level=logging.INFO)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# REPLACE WITH YOUR KEY
-GROQ_CLIENT = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY is missing")
+
+GROQ_CLIENT = Groq(api_key=GROQ_API_KEY)
+
+TEMP_DIR = "temp_audio"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 active_sessions: Dict[str, dict] = {}
-os.makedirs("temp_audio", exist_ok=True)
 
-# --- REAL MCP TOOL: WEB SEARCH ---
+
+@app.get("/")
+async def health_check():
+    return {
+        "status": "running",
+        "message": "AI Interview Backend Live"
+    }
+
+
 def mcp_search_interview_questions(company: str, role: str) -> str:
-    """
-    REAL MCP TOOL: Searches the live web for recent interview questions.
-    Uses DuckDuckGo to find actual interview experiences.
-    """
-    query = f"{company} {role} interview questions and process 2024 2025"
-    print(f"DEBUG: MCP Tool Invoked - Searching for: {query}")
-    
+
+    query = f"{company} {role} interview questions 2025"
+
     try:
-        # Searches for real results on the web
         results = DDGS().text(query, max_results=5)
-        context = "REAL INTERVIEW DATA FROM WEB:\n"
+
+        context = "REAL INTERVIEW DATA FROM WEB:\n\n"
+
         for r in results:
-            context += f"- Source: {r['title']}\n  Snippet: {r['body']}\n"
+            context += f"""
+Source: {r.get("title", "")}
+Snippet: {r.get("body", "")}
+
+"""
+
         return context
-    except Exception as e:
-        print(f"MCP Search Error: {e}")
-        return "Could not fetch live data. Using standard competency matrix."
 
-# --- HELPERS ---
+    except Exception:
+        return "Could not fetch interview data from the web."
 
-async def text_to_speech_file(text: str) -> str:
-    output_file = f"temp_audio/{uuid.uuid4()}.mp3"
-    communicate = edge_tts.Communicate(text, "en-US-BrianNeural")
-    await communicate.save(output_file)
-    return output_file
 
 def parse_resume(file_path: str) -> str:
+
     try:
         reader = PdfReader(file_path)
+
         text = ""
+
         for page in reader.pages:
-            text += page.extract_text()
+            extracted = page.extract_text()
+
+            if extracted:
+                text += extracted
+
         return text[:3000]
+
     except Exception:
         return ""
 
-# --- ENDPOINTS ---
+
+async def text_to_speech_file(text: str) -> str:
+
+    output_file = f"{TEMP_DIR}/{uuid.uuid4()}.mp3"
+
+    communicate = edge_tts.Communicate(
+        text=text,
+        voice="en-US-BrianNeural"
+    )
+
+    await communicate.save(output_file)
+
+    return output_file
+
 
 @app.post("/start_interview")
 async def start_interview(
@@ -78,48 +109,53 @@ async def start_interview(
     company: str = Form(...),
     role: str = Form(...),
     experience: str = Form(...),
-    num_questions: int = Form(...), # Added this field
+    num_questions: int = Form(...),
     jd: str = Form(""),
     resume: UploadFile = File(None)
 ):
+
     session_id = str(uuid.uuid4())
+
     resume_text = ""
-    
+
     if resume:
-        temp_pdf_path = f"temp_audio/{resume.filename}"
+
+        temp_pdf_path = f"{TEMP_DIR}/{uuid.uuid4()}_{resume.filename}"
+
         with open(temp_pdf_path, "wb") as f:
             f.write(await resume.read())
+
         resume_text = parse_resume(temp_pdf_path)
+
         os.remove(temp_pdf_path)
 
-    # 1. EXECUTE REAL MCP SEARCH
-    # This fetches actual data like "Amazon Leadership Principles" or "Google GCA" from the web
     search_context = mcp_search_interview_questions(company, role)
 
-    # 2. Build Intelligent Context
     system_prompt = f"""
-    You are an expert technical interviewer for {company}. 
-    Candidate: {name}. Role: {role}. Exp: {experience} years.
-    
-    LIVE WEB SEARCH CONTEXT (REAL QUESTIONS):
-    {search_context}
-    
-    JOB DESCRIPTION: 
-    {jd[:800]}
-    
-    RESUME SUMMARY: 
-    {resume_text[:1500]}
-    
-    INSTRUCTIONS:
-    - Use the 'Live Web Search Context' to ask REAL questions that {company} actually asks.
-    - If {company} is Amazon, focus heavily on Leadership Principles found in the search context.
-    - Keep responses professional but conversational.
-    - Ask exactly {num_questions} questions in total.
-    - Start by welcoming them and asking the first question.
-    -keep the questions short 2-4 lines
-    """
-    
-    # Store session
+You are an expert interviewer for {company}.
+
+Candidate Name: {name}
+Role: {role}
+Experience: {experience} years
+
+WEB SEARCH CONTEXT:
+{search_context}
+
+JOB DESCRIPTION:
+{jd[:1000]}
+
+RESUME:
+{resume_text[:1500]}
+
+RULES:
+- Ask realistic interview questions
+- Keep questions short
+- Be conversational
+- Ask exactly {num_questions} questions
+- Start with a welcome message and first question
+- Ask one question at a time
+"""
+
     active_sessions[session_id] = {
         "candidate_name": name,
         "company": company,
@@ -129,118 +165,196 @@ async def start_interview(
         "question_count": 0,
         "max_questions": num_questions
     }
-    
-    # Generate Intro
+
     completion = GROQ_CLIENT.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role": "system", "content": system_prompt}],
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt
+            }
+        ],
         temperature=0.7
     )
-    
+
     initial_text = completion.choices[0].message.content
-    active_sessions[session_id]["conversation_history"].append({"role": "assistant", "content": initial_text})
-    
+
+    active_sessions[session_id]["conversation_history"].append(
+        {
+            "role": "assistant",
+            "content": initial_text
+        }
+    )
+
     audio_path = await text_to_speech_file(initial_text)
-    
-    return JSONResponse({
-        "session_id": session_id, 
-        "audio_url": f"/get_audio/{os.path.basename(audio_path)}",
-        "text": initial_text,
-        "current_question": 1,
-        "total_questions": num_questions
-    })
+
+    return JSONResponse(
+        {
+            "session_id": session_id,
+            "text": initial_text,
+            "audio_url": f"/get_audio/{os.path.basename(audio_path)}",
+            "current_question": 1,
+            "total_questions": num_questions
+        }
+    )
+
 
 @app.post("/process_response")
-async def process_response(session_id: str = Form(...), audio: UploadFile = File(...)):
+async def process_response(
+    session_id: str = Form(...),
+    audio: UploadFile = File(...)
+):
+
     if session_id not in active_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found"
+        )
+
     session = active_sessions[session_id]
-    
-    # 1. Transcribe
-    temp_webm = f"temp_audio/{uuid.uuid4()}.webm"
-    with open(temp_webm, "wb") as f:
+
+    temp_audio_path = f"{TEMP_DIR}/{uuid.uuid4()}.webm"
+
+    with open(temp_audio_path, "wb") as f:
         f.write(await audio.read())
-        
-    with open(temp_webm, "rb") as file:
+
+    with open(temp_audio_path, "rb") as file:
+
         transcription = GROQ_CLIENT.audio.transcriptions.create(
-            file=(temp_webm, file.read()),
+            file=(temp_audio_path, file.read()),
             model="whisper-large-v3",
             response_format="text"
         )
-    os.remove(temp_webm)
-    
-    user_text = transcription
-    session["conversation_history"].append({"role": "user", "content": user_text})
-    
-    # 2. Check Limits
-    session["question_count"] += 1
-    if session["question_count"] >= session["max_questions"]:
-         return JSONResponse({"status": "COMPLETED"})
 
-    # 3. Generate Response
-    # We pass the system prompt again to ensure it remembers the "Amazon/Google" context
-    messages = [{"role": "system", "content": session["system_prompt"]}] + session["conversation_history"][-6:]
-    
+    os.remove(temp_audio_path)
+
+    user_text = transcription
+
+    session["conversation_history"].append(
+        {
+            "role": "user",
+            "content": user_text
+        }
+    )
+
+    session["question_count"] += 1
+
+    if session["question_count"] >= session["max_questions"]:
+
+        return JSONResponse(
+            {
+                "status": "COMPLETED"
+            }
+        )
+
+    messages = [
+        {
+            "role": "system",
+            "content": session["system_prompt"]
+        }
+    ] + session["conversation_history"][-6:]
+
     completion = GROQ_CLIENT.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=messages,
         temperature=0.6
     )
-    
+
     ai_response = completion.choices[0].message.content
-    session["conversation_history"].append({"role": "assistant", "content": ai_response})
-    
+
+    session["conversation_history"].append(
+        {
+            "role": "assistant",
+            "content": ai_response
+        }
+    )
+
     audio_path = await text_to_speech_file(ai_response)
-    
-    return JSONResponse({
-        "status": "IN_PROGRESS",
-        "audio_url": f"/get_audio/{os.path.basename(audio_path)}",
-        "text": ai_response,
-        "current_question": session["question_count"] + 1
-    })
+
+    return JSONResponse(
+        {
+            "status": "IN_PROGRESS",
+            "text": ai_response,
+            "audio_url": f"/get_audio/{os.path.basename(audio_path)}",
+            "current_question": session["question_count"] + 1
+        }
+    )
+
 
 @app.post("/generate_feedback")
-async def generate_feedback(session_id: str = Form(...)):
+async def generate_feedback(
+    session_id: str = Form(...)
+):
+
+    if session_id not in active_sessions:
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found"
+        )
+
     session = active_sessions[session_id]
-    
-    # Highly strict feedback prompt
+
     prompt = f"""
-    You are a senior Bar Raiser at {session['company']}. 
-    Analyze this interview transcript strictly.
-    
-    TRANSCRIPT:
-    {session['conversation_history']}
-    
-    GENERATE A REPORT IN MARKDOWN FORMAT:
-    
-    # Executive Summary
-    (2-3 sentences on overall performance)
-    
-    # Detailed Metrics
-    - **Technical Accuracy:** [Score/100] - (Explain why)
-    - **Communication:** [Score/100] - (Explain clarity/conciseness)
-    - **Critical Thinking:** [Score/100] - (Did they handle ambiguity?)
-    - **{session['company']} Culture Fit:** [Score/100] - (Based on search context)
-    
-    # Strengths
-    - (Quote specific things the candidate said)
-    - (Quote specific things the candidate said)
-    
-    # Areas for Improvement
-    - (Specific actionable advice)
-    
-    # Final Decision
-    **[HIRE / NO HIRE]**
-    """
-    
+You are a senior interviewer at {session['company']}.
+
+Analyze the interview transcript strictly.
+
+TRANSCRIPT:
+{session['conversation_history']}
+
+Generate a markdown report with:
+
+# Executive Summary
+
+# Detailed Metrics
+- Technical Accuracy
+- Communication
+- Critical Thinking
+- Culture Fit
+
+# Strengths
+
+# Areas for Improvement
+
+# Final Decision
+(HIRE / NO HIRE)
+"""
+
     completion = GROQ_CLIENT.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}]
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
     )
-    
-    return {"report": completion.choices[0].message.content}
+
+    return {
+        "report": completion.choices[0].message.content
+    }
+
 
 @app.get("/get_audio/{filename}")
 async def get_audio(filename: str):
-    return FileResponse(f"temp_audio/{filename}")
+
+    file_path = f"{TEMP_DIR}/{filename}"
+
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Audio file not found"
+        )
+
+    return FileResponse(file_path)
+
+
+if __name__ == "__main__":
+
+    port = int(os.environ.get("PORT", 8000))
+
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=port
+    )
