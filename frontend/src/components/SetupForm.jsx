@@ -17,7 +17,7 @@ export default function SetupForm({ onLoading, onStart }) {
 
     try {
       // 2. Make API Call
-      const res = await fetch('http://localhost:8000/start_interview', {
+      const res = await fetch('https://ai-interview-simulator-q0tq.onrender.com/start_interview', {
         method: 'POST',
         body: formData
       });

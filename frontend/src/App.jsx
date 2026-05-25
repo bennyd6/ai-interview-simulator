@@ -31,7 +31,7 @@ export default function App() {
     formData.append('session_id', sessionId);
     
     try {
-        const res = await fetch('http://localhost:8000/generate_feedback', {
+        const res = await fetch('https://ai-interview-simulator-q0tq.onrender.com/generate_feedback', {
           method: 'POST',
           body: formData
         });

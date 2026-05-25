@@ -58,7 +58,7 @@ export default function InterviewInterface({ sessionData, onComplete }) {
     formData.append('session_id', sessionData.session_id);
 
     try {
-      const res = await fetch('http://localhost:8000/process_response', {
+      const res = await fetch('https://ai-interview-simulator-q0tq.onrender.com/process_response', {
         method: 'POST',
         body: formData
       });
