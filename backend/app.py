@@ -6,18 +6,17 @@ from typing import Dict
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pypdf import PdfReader
 from groq import Groq
-import edge_tts
 from duckduckgo_search import DDGS
-import uvicorn
+import edge_tts
 
 load_dotenv()
 
-app = FastAPI(title="AI Interview Backend")
-
 logging.basicConfig(level=logging.INFO)
+
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,54 +29,61 @@ app.add_middleware(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY is missing")
+    raise Exception("GROQ_API_KEY not found")
 
-GROQ_CLIENT = Groq(api_key=GROQ_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 TEMP_DIR = "temp_audio"
+
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 active_sessions: Dict[str, dict] = {}
 
 
-@app.get("/")
-async def health_check():
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root():
     return {
-        "status": "running",
-        "message": "AI Interview Backend Live"
+        "status": "running"
     }
 
 
-def mcp_search_interview_questions(company: str, role: str) -> str:
+def search_interview_questions(company: str, role: str):
 
     query = f"{company} {role} interview questions 2025"
 
     try:
+
         results = DDGS().text(query, max_results=5)
 
-        context = "REAL INTERVIEW DATA FROM WEB:\n\n"
+        context = ""
 
         for r in results:
+
             context += f"""
 Source: {r.get("title", "")}
-Snippet: {r.get("body", "")}
+
+Snippet:
+{r.get("body", "")}
 
 """
 
         return context
 
     except Exception:
-        return "Could not fetch interview data from the web."
+
+        return ""
 
 
-def parse_resume(file_path: str) -> str:
+def parse_resume(file_path: str):
 
     try:
+
         reader = PdfReader(file_path)
 
         text = ""
 
         for page in reader.pages:
+
             extracted = page.extract_text()
 
             if extracted:
@@ -86,21 +92,24 @@ def parse_resume(file_path: str) -> str:
         return text[:3000]
 
     except Exception:
+
         return ""
 
 
-async def text_to_speech_file(text: str) -> str:
+async def generate_audio(text: str):
 
-    output_file = f"{TEMP_DIR}/{uuid.uuid4()}.mp3"
+    filename = f"{uuid.uuid4()}.mp3"
+
+    path = os.path.join(TEMP_DIR, filename)
 
     communicate = edge_tts.Communicate(
         text=text,
         voice="en-US-BrianNeural"
     )
 
-    await communicate.save(output_file)
+    await communicate.save(path)
 
-    return output_file
+    return filename
 
 
 @app.post("/start_interview")
@@ -120,53 +129,54 @@ async def start_interview(
 
     if resume:
 
-        temp_pdf_path = f"{TEMP_DIR}/{uuid.uuid4()}_{resume.filename}"
+        temp_resume_path = os.path.join(
+            TEMP_DIR,
+            f"{uuid.uuid4()}_{resume.filename}"
+        )
 
-        with open(temp_pdf_path, "wb") as f:
+        with open(temp_resume_path, "wb") as f:
             f.write(await resume.read())
 
-        resume_text = parse_resume(temp_pdf_path)
+        resume_text = parse_resume(temp_resume_path)
 
-        os.remove(temp_pdf_path)
+        os.remove(temp_resume_path)
 
-    search_context = mcp_search_interview_questions(company, role)
+    web_context = search_interview_questions(company, role)
 
     system_prompt = f"""
 You are an expert interviewer for {company}.
 
 Candidate Name: {name}
 Role: {role}
-Experience: {experience} years
+Experience: {experience}
 
-WEB SEARCH CONTEXT:
-{search_context}
+Interview Context:
+{web_context}
 
-JOB DESCRIPTION:
+Job Description:
 {jd[:1000]}
 
-RESUME:
+Resume:
 {resume_text[:1500]}
 
-RULES:
+Instructions:
 - Ask realistic interview questions
+- Ask one question at a time
 - Keep questions short
 - Be conversational
 - Ask exactly {num_questions} questions
-- Start with a welcome message and first question
-- Ask one question at a time
 """
 
     active_sessions[session_id] = {
-        "candidate_name": name,
         "company": company,
         "role": role,
-        "system_prompt": system_prompt,
         "conversation_history": [],
+        "system_prompt": system_prompt,
         "question_count": 0,
         "max_questions": num_questions
     }
 
-    completion = GROQ_CLIENT.chat.completions.create(
+    completion = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {
@@ -177,26 +187,24 @@ RULES:
         temperature=0.7
     )
 
-    initial_text = completion.choices[0].message.content
+    ai_message = completion.choices[0].message.content
 
     active_sessions[session_id]["conversation_history"].append(
         {
             "role": "assistant",
-            "content": initial_text
+            "content": ai_message
         }
     )
 
-    audio_path = await text_to_speech_file(initial_text)
+    audio_filename = await generate_audio(ai_message)
 
-    return JSONResponse(
-        {
-            "session_id": session_id,
-            "text": initial_text,
-            "audio_url": f"/get_audio/{os.path.basename(audio_path)}",
-            "current_question": 1,
-            "total_questions": num_questions
-        }
-    )
+    return {
+        "session_id": session_id,
+        "text": ai_message,
+        "audio_url": f"/audio/{audio_filename}",
+        "current_question": 1,
+        "total_questions": num_questions
+    }
 
 
 @app.post("/process_response")
@@ -206,6 +214,7 @@ async def process_response(
 ):
 
     if session_id not in active_sessions:
+
         raise HTTPException(
             status_code=404,
             detail="Session not found"
@@ -213,15 +222,18 @@ async def process_response(
 
     session = active_sessions[session_id]
 
-    temp_audio_path = f"{TEMP_DIR}/{uuid.uuid4()}.webm"
+    temp_audio_path = os.path.join(
+        TEMP_DIR,
+        f"{uuid.uuid4()}.webm"
+    )
 
     with open(temp_audio_path, "wb") as f:
         f.write(await audio.read())
 
-    with open(temp_audio_path, "rb") as file:
+    with open(temp_audio_path, "rb") as audio_file:
 
-        transcription = GROQ_CLIENT.audio.transcriptions.create(
-            file=(temp_audio_path, file.read()),
+        transcription = groq_client.audio.transcriptions.create(
+            file=(temp_audio_path, audio_file.read()),
             model="whisper-large-v3",
             response_format="text"
         )
@@ -241,11 +253,9 @@ async def process_response(
 
     if session["question_count"] >= session["max_questions"]:
 
-        return JSONResponse(
-            {
-                "status": "COMPLETED"
-            }
-        )
+        return {
+            "status": "COMPLETED"
+        }
 
     messages = [
         {
@@ -254,7 +264,7 @@ async def process_response(
         }
     ] + session["conversation_history"][-6:]
 
-    completion = GROQ_CLIENT.chat.completions.create(
+    completion = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=messages,
         temperature=0.6
@@ -269,16 +279,14 @@ async def process_response(
         }
     )
 
-    audio_path = await text_to_speech_file(ai_response)
+    audio_filename = await generate_audio(ai_response)
 
-    return JSONResponse(
-        {
-            "status": "IN_PROGRESS",
-            "text": ai_response,
-            "audio_url": f"/get_audio/{os.path.basename(audio_path)}",
-            "current_question": session["question_count"] + 1
-        }
-    )
+    return {
+        "status": "IN_PROGRESS",
+        "text": ai_response,
+        "audio_url": f"/audio/{audio_filename}",
+        "current_question": session["question_count"] + 1
+    }
 
 
 @app.post("/generate_feedback")
@@ -287,6 +295,7 @@ async def generate_feedback(
 ):
 
     if session_id not in active_sessions:
+
         raise HTTPException(
             status_code=404,
             detail="Session not found"
@@ -297,30 +306,29 @@ async def generate_feedback(
     prompt = f"""
 You are a senior interviewer at {session['company']}.
 
-Analyze the interview transcript strictly.
+Analyze this interview strictly.
 
-TRANSCRIPT:
+Transcript:
 {session['conversation_history']}
 
-Generate a markdown report with:
+Generate:
 
 # Executive Summary
 
-# Detailed Metrics
-- Technical Accuracy
-- Communication
-- Critical Thinking
-- Culture Fit
+# Technical Accuracy
+
+# Communication
+
+# Critical Thinking
 
 # Strengths
 
-# Areas for Improvement
+# Weaknesses
 
 # Final Decision
-(HIRE / NO HIRE)
 """
 
-    completion = GROQ_CLIENT.chat.completions.create(
+    completion = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {
@@ -335,26 +343,16 @@ Generate a markdown report with:
     }
 
 
-@app.get("/get_audio/{filename}")
+@app.get("/audio/{filename}")
 async def get_audio(filename: str):
 
-    file_path = f"{TEMP_DIR}/{filename}"
+    file_path = os.path.join(TEMP_DIR, filename)
 
     if not os.path.exists(file_path):
+
         raise HTTPException(
             status_code=404,
-            detail="Audio file not found"
+            detail="Audio not found"
         )
 
     return FileResponse(file_path)
-
-
-if __name__ == "__main__":
-
-    port = int(os.environ.get("PORT", 8000))
-
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=port
-    )
