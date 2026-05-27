@@ -6,7 +6,6 @@ export default function FeedbackReport({ report, metrics, onRestart }) {
 
   useEffect(() => {
     if (metrics && Array.isArray(metrics) && metrics.length > 0) {
-        // Calculate the average score from the dynamic metrics provided by the backend
         const total = metrics.reduce((sum, m) => sum + (m.value || 0), 0);
         setOverallScore(Math.round(total / metrics.length));
     }
