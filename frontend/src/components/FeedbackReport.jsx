@@ -14,7 +14,7 @@ export default function FeedbackReport({ report, metrics, onRestart }) {
   return (
     <div className="min-h-screen bg-white text-black p-8 md:p-12 font-sans">
       <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-12">
-        {/* LEFT: SCORE DASHBOARD (Simplified) */}
+
         <div className="lg:col-span-1 space-y-8 sticky top-8 h-fit">
           <div className="space-y-2">
             <h1 className="text-4xl font-bold tracking-tight">Evaluation Report</h1>
