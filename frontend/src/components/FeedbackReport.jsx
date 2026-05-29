@@ -11,6 +11,9 @@ export default function FeedbackReport({ report, metrics, onRestart }) {
     }
   }, [metrics]);
 
+
+
+  
   return (
     <div className="min-h-screen bg-white text-black p-8 md:p-12 font-sans">
       <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-12">
