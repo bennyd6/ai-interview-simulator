@@ -9,11 +9,7 @@ export default function FeedbackReport({ report, metrics, onRestart }) {
         const total = metrics.reduce((sum, m) => sum + (m.value || 0), 0);
         setOverallScore(Math.round(total / metrics.length));
     }
-  }, [metrics]);
-
-
-
-  
+  }, [metrics]);  
   return (
     <div className="min-h-screen bg-white text-black p-8 md:p-12 font-sans">
       <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-12">
